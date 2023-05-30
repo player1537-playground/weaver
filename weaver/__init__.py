@@ -176,6 +176,73 @@ def _weave_braid_integrate(**kwargs):
 
 #--- Spool (Distributed Object Store)
 
+from uuid import uuid4 as uuid
+
+
+_g_spools: Dict[str, Spool] = {}
+
+
+def _make_token(prefix):
+    return f'{prefix}-{uuid()!s}'
+
+
+@dataclass
+class Spool:
+    name: str
+    format: name
+    ro_token: str = field(repr=False)
+    rw_token: str = field(repr=False)
+
+    @classmethod
+    def create(cls, name, format):
+        ro_token = _make_token('ro')
+        rw_token = _make_token('rw')
+
+        return cls(
+            name=name,
+            format=format,
+            ro_token=ro_token,
+            rw_token=rw_token,
+        )
+    
+    def emit(self, *values):
+        print(f'struct.pack({self.format!r}, *{values!r})')
+
+
+@weaver.register(name='create', unpack=True)
+def _weaver_spool_create(name, format):
+    spool = Spool.create(
+        name=name,
+        format=format,
+    )
+
+    _g_spools[spool.ro_token] = spool
+    _g_spools[spool.rw_token] = spool
+
+    return {
+        'tokens': {
+            'ro': spool.ro_token,
+            'rw': spool.rw_token,
+        },
+    }
+
+
+@weaver.register(name='emit', unpack=True)
+def _weaver_spool_emit(spool, *values):
+    match spool:
+        case str() as token:
+            spool = _g_spools[token]
+        
+        case {'tokens': {'rw': token}}:
+            spool = _g_spools[token]
+        
+        case {'tokens': {'ro': token}}:
+            spool = _g_spools[token]
+
+    values = Weaver.realize(values)
+
+    spool.emit(*values)
+
 
 #--- Weave (HTTP Server Interface)
 
@@ -196,7 +263,7 @@ def weave():
     return weaver.execute(code)
 
 
-def main(bind, port, debug):
+def main(bind, host, port, debug):
     global _g_braid_integrator
 
     _g_braid_integrator = Integrator.from_files(
@@ -217,6 +284,7 @@ def cli():
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--bind', default='0.0.0.0')
+    parser.add_argument('--host', default='127.0.0.1')
     parser.add_argument('--port', default=7772)
     parser.add_argument('--debug', action='store_true')
     args = vars(parser.parse_args())

@@ -13,7 +13,7 @@ go---virtualenv() {
 
 Server_app=weaver
 Server_bind=127.0.0.1
-Server_port=7772
+Server_port=7001
 Server_host=vaas.is.mediocreatbest.xyz
 
 go-Server() {
@@ -33,6 +33,7 @@ go-Request() {
     )
 
     exec < <(pexec curl \
+        --location \
         --silent \
         --get \
         -X POST \
@@ -56,6 +57,24 @@ go-Integrate() {
 return braid{ from='2012-01-01', to='2012-06-30', seeds={
     { lat=35.9606, lng=83.9207, prs=800.0 },
 }}
+EOF
+}
+
+Spool_url=https://${Server_host:?}/weave/
+
+go-Spool() {
+    pexec "${self:?}" Request \
+        "${Spool_url:?}" \
+        <<'EOF'
+local spool = create('testing', 'ff')
+print(spool)
+
+emit(spool, 1.23, 3.45)
+emit(spool, 2.23, 6.45)
+emit(spool, 4.23, 9.45)
+emit(spool, 8.23, 1.45)
+
+return spool.tokens.ro
 EOF
 }
 
