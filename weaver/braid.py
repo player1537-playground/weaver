@@ -8,6 +8,7 @@ import struct
 from contextlib import ExitStack, contextmanager
 from typing import NewType
 from os import PathLike
+from math import cos, pi
 
 import numpy as np
 from scipy.interpolate import (
@@ -133,10 +134,20 @@ class Interpolator:
         t: Seconds,
         x: Tuple[Pressure, Longitude, Latitude],
     ) -> float:
+        # print(f'{self.__class__.__name__}: {t = !r} {x = !r}')
+        t = np.array(t)
+        match x.shape:
+            case (3, n):
+                t = np.resize(t, (1, n))
+        # print(f'{self.__class__.__name__}: {t = !r} {x = !r}')
+
+        # x = (t,) + x
         x = np.vstack((t, x)).T
+        # x = np.hstack((t, x))
         y = self.interpolator(x)
         if self.multiplier is not None:
             y *= self.multiplier
+        y = y.T
         return y
 
 
@@ -148,8 +159,8 @@ class Integrator:
 
     @classmethod
     def from_files(cls, *, ugrd: FileLike, vgrd: FileLike, vvel: FileLike) -> Climate:
-        ugrd = Interpolator.from_file(ugrd)
-        vgrd = Interpolator.from_file(vgrd)
+        ugrd = Interpolator.from_file(ugrd, multiplier=1e6)
+        vgrd = Interpolator.from_file(vgrd, multiplier=1e6)
         vvel = Interpolator.from_file(vvel)
 
         return cls(
@@ -159,11 +170,23 @@ class Integrator:
         )
 
     def __call__(self, t: Sec, x: Tuple[Prs, Lng, Lat]) -> Tuple[Val, Val, Val]:
+        # print(f'{self.__class__.__name__}: {t = !r} {x=!r}')
+        if x.shape == (3,):
+            x = x[:, None]
+        # print(f'{self.__class__.__name__}: {t = !r} {x=!r}')
+        cos_lat = np.cos(x[LAT, :] * pi / 180.0)
+
         ugrd: Val = self.ugrd(t, x)
         vgrd: Val = self.vgrd(t, x)
         vvel: Val = self.vvel(t, x)
-        
-        return (ugrd, vgrd, vvel)
+
+        dlat = ugrd / (cos_lat * 111000.0 * 1.25)
+        dlng = vgrd / 111000.0
+        dprs = vvel
+
+        # print(f'{dlat = !r} {dlng=!r} {dprs=!r}')
+
+        return np.hstack((dprs, dlng, dlat))
 
     def integrate(self,
         *,
@@ -172,6 +195,16 @@ class Integrator:
         tf: Sec,
     ) -> Iterator[Tuple[Sec, Tuple[Prs, Lng, Lat]]]:
         _1_DAY_IN_SECONDS = 60 * 60 * 24
+
+        # print(f'integrate: {t0=!r} {y0=!r} {tf=!r}')
+
+        prs, lng, lat = y0
+        assert prs > 0
+        if lng < 0.0: lng += 360.0
+        if lng > 360.0: lng -= 360.0
+        if lat < -90.0: lat += 180.0
+        if lat > 90.0: lat -= 180.0
+        y0 = (prs, lng, lat)
 
         y0 = np.array(y0)
 
@@ -192,13 +225,14 @@ class Integrator:
             t = integrator.t
             y = integrator.y
 
-            if y[PRS] < 0: break
-            y[y[LNG] < 0.0] += 360.0
-            y[y[LNG] > 360.0] -= 360.0
-            y[y[LAT] < -90.0] += 180.0
-            y[y[LAT] > 90.0] -= 180.0
+            prs, lng, lat = y
+            if prs < 0: break
+            if lng < 0.0: lng += 360.0
+            if lng > 360.0: lng -= 360.0
+            if lat < -90.0: lat += 180.0
+            if lat > 90.0: lat -= 180.0
 
-            yield t, y
+            yield t, (prs, lng, lat)
 
             if integrator.status != 'running':
                 break
