@@ -172,7 +172,7 @@ SeedDict = TypedDict('SeedDict', prs=Pressure, lat=Latitude, lng=Longitude)
 _g_braid_integrator: Integrator = None
 
 
-@weaver.register(name='braid', unpack=True, repack=True)
+@weaver.register(name='weave_braid_trace', unpack=True, repack=True)
 def _weave_braid_integrate(**kwargs):
     seeds = kwargs.pop('seeds')
     from_ = kwargs.pop('from')
@@ -235,6 +235,27 @@ import struct
 _g_spools: Dict[str, Spool] = {}
 
 
+def lookup_spool(spool) -> Tuple[Spool, bool]:
+    match spool:
+        case str() as token:
+            pass
+        
+        case {'tokens': {'rw': token}}:
+            pass
+        
+        case {'tokens': {'ro': token}}:
+            pass
+        
+        case {'rw': token}:
+            pass
+        
+        case _:
+            raise KeyError(f'No spool found for: {spool=!r}')
+
+    spool = _g_spools[token]
+    return spool, token == spool.rw_token
+
+
 def _make_token(prefix):
     return f'{prefix}-{uuid()!s}'
 
@@ -250,10 +271,11 @@ class Spool:
     lock: Lock = field(repr=False)
 
     @classmethod
-    def create(cls, name, **kwargs):
-        columns = []
-        formats = []
-        for column, format in kwargs.items():
+    def create(cls, name, formats: List[Tuple[str, str]]):
+        the_formats = formats
+
+        columns, formats = [], []
+        for column, format in the_formats:
             columns.append(column)
             formats.append(format)
         
@@ -263,6 +285,16 @@ class Spool:
         rw_token = _make_token('rw')
         data = []
         lock = Lock()
+
+        print(dict(
+            name=name,
+            columns=columns,
+            format=format,
+            ro_token=ro_token,
+            rw_token=rw_token,
+            data=data,
+            lock=lock,
+        ))
 
         return cls(
             name=name,
@@ -296,11 +328,24 @@ class Spool:
         return items
 
 
-@weaver.register(name='create', unpack=True)
-def _weaver_spool_create(name, **kwargs):
+@weaver.register(name='weave_spool_create', unpack=True)
+def _weaver_spool_create(name, *args, **kwargs):
+    formats = []
+    for arg in args:
+        arg = Weaver.realize(arg)
+
+        if isinstance(arg, dict):
+            for k, v in arg.items():
+                formats.append((k, v))
+        else:
+            raise ValueError(f'Unexpected argument: create({name!r}, *{args!r}, **{kwargs!r}')
+    
+    for k, v in kwargs.items():
+        formats.append((k, v))
+
     spool = Spool.create(
         name=name,
-        **kwargs,
+        formats=formats,
     )
 
     _g_spools[spool.ro_token] = spool
@@ -314,7 +359,7 @@ def _weaver_spool_create(name, **kwargs):
     }
 
 
-@weaver.register(name='emit', unpack=True)
+@weaver.register(name='weave_spool_emit', unpack=True)
 def _weaver_spool_emit(spool, **values):
     match spool:
         case str() as token:
@@ -333,7 +378,7 @@ def _weaver_spool_emit(spool, **values):
     spool.emit(**values)
 
 
-@weaver.register(name='items', unpack=True, repack=True)
+@weaver.register(name='weave_spool_items', unpack=True, repack=True)
 def _weave_spool_items(spool):
     match spool:
         case str() as token:
@@ -347,6 +392,51 @@ def _weave_spool_items(spool):
 
     return spool.items()
 
+
+#--- Graph (Large Graph Visualization)
+
+@dataclass
+class Lookupable:
+    pass
+
+
+@dataclass
+class Graph:
+    root: Path
+
+    @classmethod
+    def create():
+        pass
+
+
+@weaver.register(name='weave_graph_ingest', unpack=True)
+def _weave_graph_ingest(*, index, nodes=None, edges=None):
+    index = lookup_spool(index)
+    assert len(index.columns) == 2, \
+        f'The index spool should have two columns, actual: {index.columns!r}'
+
+    attributes = {}
+
+    for what in [nodes, edges]:
+        for name, attribute in what.items():
+            attribute = lookup_spool(attribute)
+
+            assert len(attribute.columns) == 1, \
+                f'The attribute spools should have two columns: {name} actual columns: {attribute.columns!r}'
+
+            attributes[name] = attribute
+
+    graph = Graph.create(
+        index=index,
+        attributes=attributes,
+    )
+
+    return {
+        'tokens': {
+            'rw': graph.rw_token,
+            'ro': graph.ro_token,
+        },
+    }
 
 
 #--- Weave (HTTP Server Interface)
