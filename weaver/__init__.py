@@ -7,6 +7,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+#--- Utilities (for all of the following codes)
+
+def _make_token(prefix):
+    return f'{prefix}-{uuid()!s}'
+
+
 #--- Weave (Functional Software Interface)
 
 import threading
@@ -178,17 +184,15 @@ def _weave_braid_integrate(**kwargs):
     from_ = kwargs.pop('from')
     to = kwargs.pop('to')
 
-    match from_:
-        case str():
-            from_ = datetime.strptime(from_, "%Y-%m-%d")
-            from_ = from_ - datetime.strptime('2012-01-01', '%Y-%m-%d')
-            from_ = from_.total_seconds()
+    if isinstance(from_, str):
+        from_ = datetime.strptime(from_, "%Y-%m-%d")
+        from_ = from_ - datetime.strptime('2012-01-01', '%Y-%m-%d')
+        from_ = from_.total_seconds()
     
-    match to:
-        case str():
-            to = datetime.strptime(to, "%Y-%m-%d")
-            to = to - datetime.strptime('2012-01-01', '%Y-%m-%d')
-            to = to.total_seconds()
+    if isinstance(to, str):
+        to = datetime.strptime(to, "%Y-%m-%d")
+        to = to - datetime.strptime('2012-01-01', '%Y-%m-%d')
+        to = to.total_seconds()
     
     seeds = Weaver.realize(seeds)
 
@@ -196,9 +200,8 @@ def _weave_braid_integrate(**kwargs):
 
     traces = []
     for seed in seeds:
-        match seed:
-            case {'prs': prs, 'lng': lng, 'lat': lat}:
-                seed = (prs, lng, lat)
+        if isinstance(seed, dict) and 'prs' in seed and 'lng' in seed and 'lat' in seed:
+            seed = (seed['prs'], seed['lng'], seed['lat'])
 
         # print(f'{from_ = !r} {seed = !r} {to = !r}')
 
@@ -236,28 +239,32 @@ _g_spools: Dict[str, Spool] = {}
 
 
 def lookup_spool(spool) -> Tuple[Spool, bool]:
-    match spool:
-        case str() as token:
-            pass
-        
-        case {'tokens': {'rw': token}}:
-            pass
-        
-        case {'tokens': {'ro': token}}:
-            pass
-        
-        case {'rw': token}:
-            pass
-        
-        case _:
-            raise KeyError(f'No spool found for: {spool=!r}')
+    spool = Weaver.realize(spool)
+
+    if isinstance(spool, str):
+        token = spool
+    
+    elif isinstance(spool, dict) and 'tokens' in spool and isinstance(spool['tokens'], dict) and 'rw' in spool['tokens'] and isinstance(spool['tokens']['rw'], str):
+        token = spool['tokens']['rw']
+
+    elif isinstance(spool, dict) and 'tokens' in spool and isinstance(spool['tokens'], dict) and 'ro' in spool['tokens'] and isinstance(spool['tokens']['ro'], str):
+        token = spool['tokens']['ro']
+    
+    elif isinstance(spool, dict) and 'rw' in spool and isinstance(spool['rw'], str):
+        token = spool['rw']
+
+    elif isinstance(spool, dict) and 'ro' in spool and isinstance(spool['ro'], str):
+        token = spool['ro']
+    
+    else:
+        raise KeyError(f'No spool found for: {spool=!r}')
 
     spool = _g_spools[token]
     return spool, token == spool.rw_token
 
 
-def _make_token(prefix):
-    return f'{prefix}-{uuid()!s}'
+def _make_spool_token(prefix):
+    return _make_token(f'{prefix}-spool')
 
 
 @dataclass
@@ -281,8 +288,8 @@ class Spool:
         
         format = ''.join(formats)
 
-        ro_token = _make_token('ro')
-        rw_token = _make_token('rw')
+        ro_token = _make_spool_token('ro')
+        rw_token = _make_spool_token('rw')
         data = []
         lock = Lock()
 
@@ -327,6 +334,13 @@ class Spool:
 
         return items
 
+    def dump(self, path: Path):
+        with self.lock:
+            data = b''.join(self.data)
+            self.data = [data]
+        
+        path.write_bytes(data)
+
 
 @weaver.register(name='weave_spool_create', unpack=True)
 def _weaver_spool_create(name, *args, **kwargs):
@@ -361,15 +375,9 @@ def _weaver_spool_create(name, *args, **kwargs):
 
 @weaver.register(name='weave_spool_emit', unpack=True)
 def _weaver_spool_emit(spool, **values):
-    match spool:
-        case str() as token:
-            spool = _g_spools[token]
-        
-        case {'tokens': {'rw': token}}:
-            spool = _g_spools[token]
-        
-        case {'tokens': {'ro': token}}:
-            raise ValueError(f'Cannot emit to a spool with a read-only token')
+    spool, can_write = lookup_spool(spool)
+    if not can_write:
+        raise ValueError(f'Cannot emit to a spool with a read-only token')
 
     # print(f'{values=!r}')
     values = Weaver.realize(values)
@@ -380,59 +388,105 @@ def _weaver_spool_emit(spool, **values):
 
 @weaver.register(name='weave_spool_items', unpack=True, repack=True)
 def _weave_spool_items(spool):
-    match spool:
-        case str() as token:
-            spool = _g_spools[token]
-        
-        case {'tokens': {'rw': token}}:
-            spool = _g_spools[token]
-        
-        case {'tokens': {'ro': token}}:
-            spool = _g_spools[token]
-
+    spool, _can_write = lookup_spool(spool)
     return spool.items()
 
 
 #--- Graph (Large Graph Visualization)
 
+_g_graphs: Dict[str, Graph] = {}
+
+
+def _make_graph_token(prefix):
+    return _make_token(f'{prefix}-graph')
+
+
 @dataclass
-class Lookupable:
-    pass
+class Attribute:
+    graph: Graph
+    name: str
+    path: Path
 
 
 @dataclass
 class Graph:
     root: Path
+    fs_token: str
+    ro_token: str
+    rw_token: str
+    lock: Lock
+    attributes: Dict[str, Path]
 
     @classmethod
-    def create():
+    def create(cls, root: Path):
+        fs_token = _make_graph_token('fs')
+        ro_token = _make_graph_token('ro')
+        rw_token = _make_graph_token('rw')
+
+        root = root / fs_token
+        root.mkdir(exist_ok=False, parents=False)
+
+        lock = Lock()
+        attributes = {}
+
+        return cls(
+            root=root,
+            fs_token=fs_token,
+            ro_token=ro_token,
+            rw_token=rw_token,
+            lock=lock,
+            attributes=attributes,
+        )
+    
+    def ingest(self, index, attributes):
+        with self.lock:
+            for name, spool in [
+                ('index', index),
+            ] + [
+                (k, v)
+                for k, v in attributes.items()
+            ]:
+                path = self.root / f'{name}.bin'
+                spool.dump(path)
+                self.attributes[name] = Attribute(
+                    graph=self,
+                    name=name,
+                    path=path,
+                )
+
+    def render(self, code):
         pass
+
 
 
 @weaver.register(name='weave_graph_ingest', unpack=True)
 def _weave_graph_ingest(*, index, nodes=None, edges=None):
-    index = lookup_spool(index)
+    index, _can_write = lookup_spool(index)
     assert len(index.columns) == 2, \
         f'The index spool should have two columns, actual: {index.columns!r}'
 
     attributes = {}
-
     for what in [nodes, edges]:
+        if what is None:
+            continue
+        
         for name, attribute in what.items():
-            attribute = lookup_spool(attribute)
+            attribute, _can_write = lookup_spool(attribute)
 
             assert len(attribute.columns) == 1, \
-                f'The attribute spools should have two columns: {name} actual columns: {attribute.columns!r}'
+                f'The attribute spool should have one column: {name} actual columns: {attribute.columns!r}'
 
             attributes[name] = attribute
 
     graph = Graph.create(
-        index=index,
-        attributes=attributes,
+        root=Path(__file__).parent.parent / 'graph',
     )
+
+    graph.ingest(index, attributes)
 
     return {
         'tokens': {
+            'fs': graph.fs_token,
             'rw': graph.rw_token,
             'ro': graph.ro_token,
         },
@@ -441,7 +495,10 @@ def _weave_graph_ingest(*, index, nodes=None, edges=None):
 
 #--- Weave (HTTP Server Interface)
 
-from base64 import urlsafe_b64decode as b64decode
+from base64 import (
+    urlsafe_b64decode as b64decode,
+    urlsafe_b64encode as b64encode,
+)
 
 from flask import Flask, request
 
@@ -474,17 +531,152 @@ def main(bind, host, port, debug):
     )
 
 
+def test():
+    from string import Template
+    import pprint
+
+    global _g_braid_integrator
+
+    _g_braid_integrator = Integrator.from_files(
+        ugrd=Path.cwd() / 'data' / 'UGRD-144x73.dat',
+        vgrd=Path.cwd() / 'data' / 'VGRD-144x73.dat',
+        vvel=Path.cwd() / 'data' / 'VVEL-144x73.dat',
+    )
+
+    app.testing = True
+    client = app.test_client()
+
+    def weave(code: str, **kwargs) -> Dict:
+        url = '/weave/'
+
+        code = Template(code)
+        code = code.substitute(**kwargs)
+        code = code.encode('utf-8')
+        code = b64encode(code)
+        code = code.decode('ascii')
+
+        query_string = {
+            'code': code,
+        }
+
+        response = client.post(
+            url,
+            query_string=query_string,
+        )
+
+        return response.get_json()
+
+    graph = weave('''
+return weave_spool_create{ "graph", {src="I"}, {dst="I"} }
+    ''')
+
+    print(f'{graph = !r}')
+
+    traces = weave('''
+function quantize(options)
+  local x = options[1]
+  local lo = options.lo
+  local hi = options.hi
+  local bins = options.bins
+
+  return math.floor(bins * (x - lo) / (hi - lo))
+end
+
+local lat = 35.9606
+local lng = -83.9207
+local prs = 800.0
+
+local seeds = {}
+for i = 1, 10 do
+    seeds[#seeds+1] = { lat=lat + math.sin(i), lng=lng + math.cos(i), prs=prs }
+end
+
+local spool = [===[${graph_tokens_rw}]===]
+local traces = weave_braid_trace{ from='2012-01-01', to='2012-01-30', seeds=seeds }
+local N = 10
+
+for i = 1, #traces do
+  local trace = traces[i]
+  local seed = trace.seed
+  local points = trace.points
+
+  local prev = nil
+  for j = 1, #points do
+    local point = points[j]
+    local voxel = 0
+    voxel = N * voxel + quantize{point.prs, bins=N, lo=  1.0, hi=1000.0}
+    voxel = N * voxel + quantize{point.lng, bins=N, lo=  0.0, hi= 360.0}
+    voxel = N * voxel + quantize{point.lat, bins=N, lo=-90.0, hi=  90.0}
+
+    if prev ~= nil then
+      weave_spool_emit{ spool, src=prev, dst=voxel }
+    end
+
+    prev = voxel
+  end
+end
+
+return traces
+''', graph_tokens_rw=graph['tokens']['rw'])
+
+    print('traces =')    
+    # import pprint; pprint.pprint(traces)
+
+    index = weave('''
+local _voxel_to_node_id = {}
+local _next_node_id = 1
+function voxel_to_node_id(voxel)
+    node_id = _voxel_to_node_id[voxel]
+    if node_id == nil then
+        node_id = _next_node_id
+        _next_node_id = _next_node_id + 1
+        _voxel_to_node_id[voxel] = node_id
+    end
+
+    return node_id
+end
+
+local connections = weave_spool_items{ [===[${graph_tokens_ro}]===] }
+local index = weave_spool_create{ "index", {src="I"}, {dst="I"} }
+for i = 1, #connections do
+    local connection = connections[i]
+    local src = voxel_to_node_id{ connection.src }
+    local dst = voxel_to_node_id{ connection.dst }
+
+    weave_spool_emit{ index, src=src, dst=dst }
+end
+
+return index
+''', graph_tokens_ro=graph['tokens']['ro'])
+
+    print('index =')
+    pprint.pprint(index)
+
+    graph = weave('''
+local index = [===[${index_tokens_ro}]===]
+return weave_graph_ingest{ index=index }
+''', index_tokens_ro=index['tokens']['ro'])
+
+    print('graph =')
+    pprint.pprint(graph)
+
+
 def cli():
     import argparse
 
     parser = argparse.ArgumentParser()
+    parser.add_argument('--test', action='store_true')
     parser.add_argument('--bind', default='0.0.0.0')
     parser.add_argument('--host', default='127.0.0.1')
     parser.add_argument('--port', default=7772)
     parser.add_argument('--debug', action='store_true')
     args = vars(parser.parse_args())
 
-    main(**args)
+    if args.pop('test'):
+        test()
+
+    else:
+        main(**args)
 
 
 if __name__ == '__main__':

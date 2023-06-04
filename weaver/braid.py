@@ -136,9 +136,9 @@ class Interpolator:
     ) -> float:
         # print(f'{self.__class__.__name__}: {t = !r} {x = !r}')
         t = np.array(t)
-        match x.shape:
-            case (3, n):
-                t = np.resize(t, (1, n))
+        if len(x.shape) == 2 and x.shape[0] == 3:
+            n = x.shape[1]
+            t = np.resize(t, (1, n))
         # print(f'{self.__class__.__name__}: {t = !r} {x = !r}')
 
         # x = (t,) + x

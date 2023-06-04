@@ -11,6 +11,26 @@ go---virtualenv() {
     exec "${self:?}" "$@"
 }
 
+go---docker() {
+    pexec "${self:?}" docker \
+    exec "${self:?}" "$@"
+}
+
+go---gs() {
+    pexec "${self:?}" gs \
+    exec "${self:?}" "$@"
+}
+
+go-exec() {
+    pexec "$@"
+}
+
+go-Test() {
+    pexec python3 -m weaver \
+        --test \
+        ##
+}
+
 Server_app=weaver
 Server_bind=127.0.0.1
 Server_port=7001
@@ -76,6 +96,24 @@ emit(spool, 8.23, 1.45)
 
 return spool.tokens.ro
 EOF
+}
+
+
+#--- Docker
+
+go-docker() {
+    pexec "${root:?}/external/GraphShaders/go.sh" docker \
+        "$@" \
+        ##
+}
+
+
+#--- GraphShaders (gs)
+
+go-gs() {
+    pexec "${root:?}/external/GraphShaders/go.sh" gs \
+        "$@" \
+        ##
 }
 
 
