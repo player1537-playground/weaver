@@ -5,6 +5,7 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
+import base64
 
 
 #--- Utilities (for all of the following codes)
@@ -394,7 +395,34 @@ def _weave_spool_items(spool):
 
 #--- Graph (Large Graph Visualization)
 
+import subprocess
+
 _g_graphs: Dict[str, Graph] = {}
+
+
+def lookup_graph(graph: Any) -> Tuple[Graph, bool]:
+    graph = Weaver.realize(graph)
+
+    if isinstance(graph, str):
+        token = graph
+    
+    elif isinstance(graph, dict) and 'tokens' in graph and isinstance(graph['tokens'], dict) and 'rw' in graph['tokens'] and isinstance(graph['tokens']['rw'], str):
+        token = graph['tokens']['rw']
+
+    elif isinstance(graph, dict) and 'tokens' in graph and isinstance(graph['tokens'], dict) and 'ro' in graph['tokens'] and isinstance(graph['tokens']['ro'], str):
+        token = graph['tokens']['ro']
+    
+    elif isinstance(graph, dict) and 'rw' in graph and isinstance(graph['rw'], str):
+        token = graph['rw']
+
+    elif isinstance(graph, dict) and 'ro' in graph and isinstance(graph['ro'], str):
+        token = graph['ro']
+    
+    else:
+        raise KeyError(f'No graph found for: {graph=!r}')
+
+    graph = _g_graphs[token]
+    return graph, token == graph.rw_token
 
 
 def _make_graph_token(prefix):
@@ -412,16 +440,16 @@ class Attribute:
 class Graph:
     root: Path
     fs_token: str
-    ro_token: str
     rw_token: str
+    ro_token: str
     lock: Lock
     attributes: Dict[str, Path]
 
     @classmethod
     def create(cls, root: Path):
         fs_token = _make_graph_token('fs')
-        ro_token = _make_graph_token('ro')
         rw_token = _make_graph_token('rw')
+        ro_token = _make_graph_token('ro')
 
         root = root / fs_token
         root.mkdir(exist_ok=False, parents=False)
@@ -429,14 +457,20 @@ class Graph:
         lock = Lock()
         attributes = {}
 
-        return cls(
+        self = cls(
             root=root,
             fs_token=fs_token,
-            ro_token=ro_token,
             rw_token=rw_token,
+            ro_token=ro_token,
             lock=lock,
             attributes=attributes,
         )
+
+        _g_graphs[self.fs_token] = self
+        _g_graphs[self.ro_token] = self
+        _g_graphs[self.rw_token] = self
+
+        return self
     
     def ingest(self, index, attributes):
         with self.lock:
@@ -454,9 +488,31 @@ class Graph:
                     path=path,
                 )
 
-    def render(self, code):
-        pass
+    def render(self, *, z, x, y, code):
+        z, x, y = map('{}'.format, (z, x, y))
+        code = code.encode('utf-8')
 
+        args = [
+            'GraphShaderTranspiler.py',
+            '-i', '/dev/stdin',
+            '-f', 'element', self.attributes['index'].path,
+            '-e', 'GS_OUTPUT', '/dev/stdout',
+            '-e', 'GS_TILE_WIDTH', '256',
+            '-e', 'GS_TILE_HEIGHT', '256',
+            '-e', 'GS_TILE_Z', z,
+            '-e', 'GS_TILE_X', x,
+            '-e', 'GS_TILE_Y', y,
+        ]
+
+        process = subprocess.run(
+            args,
+            input=code,
+            stdout=subprocess.PIPE,
+            check=True,
+        )
+
+        image: bytes = process.stdout
+        return image
 
 
 @weaver.register(name='weave_graph_ingest', unpack=True)
@@ -493,12 +549,27 @@ def _weave_graph_ingest(*, index, nodes=None, edges=None):
     }
 
 
+@weaver.register(name='weave_graph_render', unpack=True)
+def _weave_graph_render(*, graph, z, x, y, code):
+    graph, _can_write = lookup_graph(graph)
+
+    image: bytes = graph.render(
+        z=z,
+        x=x,
+        y=y,
+        code=code,
+    )
+
+    image: bytes = base64.b64encode(image)
+    image: str = image.decode('ascii')
+    image: str = f'data:image/jpeg;base64,{image}'
+
+    return image
+
+
 #--- Weave (HTTP Server Interface)
 
-from base64 import (
-    urlsafe_b64decode as b64decode,
-    urlsafe_b64encode as b64encode,
-)
+import re
 
 from flask import Flask, request
 
@@ -509,10 +580,25 @@ app = Flask(__name__)
 @app.route('/weave/', methods=['POST'])
 def weave():
     code = request.args.get('code')
-    code = b64decode(code)
+    code = base64.urlsafe_b64decode(code)
     code = code.decode('ascii')
 
-    return weaver.execute(code)
+    ret = weaver.execute(code)
+
+    if isinstance(ret, str):
+        match = re.match(r'^data:(?P<mediatype>image/jpeg)?(?:;(?P<encoding>base64))?(?:,(?P<data>.+))$', ret)
+        if match is not None:
+            mediatype = match.group('mediatype')
+            encoding = match.group('encoding')
+            data = match.group('data')
+            
+            if encoding == 'base64':
+                data: bytes = data.encode('ascii')
+                data: bytes = base64.b64decode(data)
+            
+            ret = data, { 'Content-Type': mediatype }
+
+    return ret
 
 
 def main(bind, host, port, debug):
@@ -552,7 +638,7 @@ def test():
         code = Template(code)
         code = code.substitute(**kwargs)
         code = code.encode('utf-8')
-        code = b64encode(code)
+        code = base64.urlsafe_b64encode(code)
         code = code.decode('ascii')
 
         query_string = {
@@ -564,7 +650,14 @@ def test():
             query_string=query_string,
         )
 
-        return response.get_json()
+        if response.content_type == 'application/json':
+            return response.get_json()
+        
+        elif response.content_type == 'image/jpeg':
+            return response.get_data()
+        
+        else:
+            NotImplemented
 
     graph = weave('''
 return weave_spool_create{ "graph", {src="I"}, {dst="I"} }
@@ -659,6 +752,31 @@ return weave_graph_ingest{ index=index }
 
     print('graph =')
     pprint.pprint(graph)
+
+    image = weave('''
+local graph = [===[${graph_tokens_ro}]===]
+return weave_graph_render{ graph=graph, z=0, x=0, y=0, code=[===[
+#pragma gs shader(positional)
+void main() {
+    float x = sin(gs_NodeIndex / 100.0);
+    float y = cos(gs_NodeIndex / 100.0);
+
+    gs_NodePosition = vec3(x, y, 0.);
+}
+
+#pragma gs shader(relational)
+void main() {
+}
+
+#pragma gs shader(appearance)
+void main() {
+    gs_FragColor = vec4(0.1);
+}
+]===] }
+''', graph_tokens_ro=graph['tokens']['ro'])
+
+    with open(Path.cwd() / 'tmp' / 'image.jpeg', 'wb') as f:
+        f.write(image)
 
 
 def cli():

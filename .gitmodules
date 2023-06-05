@@ -1,4 +1,4 @@
 [submodule "graph"]
 	path = external/GraphShaders
 	url = https://github.com/seelabutk/GraphShaders.git
-	branch = main
+	branch = th/weave/main
