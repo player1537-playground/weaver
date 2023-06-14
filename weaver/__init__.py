@@ -22,7 +22,7 @@ from lupa import LuaRuntime, unpacks_lua_table, as_attrgetter
 
 
 SANDBOX = r'''
-function(untrusted_code, callbacks)
+function(untrusted_lib, untrusted_code, callbacks)
     local env = {};
     for key, value in python.iterex(callbacks.items()) do
         env[key] = value
@@ -50,6 +50,17 @@ function(untrusted_code, callbacks)
         pi=math.pi, pow=math.pow, rad=math.rad, sin=math.sin, sinh=math.sinh,
         sqrt=math.sqrt, tan=math.tan, tanh=math.tanh,
     }
+
+    if untrusted_lib ~= nil then
+        local untrusted_lib_function, message = load(untrusted_lib, nil, 't', env)
+        if not untrusted_lib_function then return nil, message end
+        debug.sethook(function() error("timeout") end, "", 1e6)
+        local success, ret = pcall(untrusted_lib_function)
+        debug.sethook()
+        if not success then return success, ret end
+
+        env.lib = ret
+    end
 
     local untrusted_function, message = load(untrusted_code, nil, 't', env)
     if not untrusted_function then return nil, message end
@@ -102,20 +113,23 @@ class Weaver:
 
         return wrapper
     
-    def execute(self, code):
+    def execute(self, code, *, lib=None):
+        first_line = code.split("\n")[0]
+        print(f'Execute: {first_line}')
+
         lua = LuaRuntime(
             unpack_returned_tuples=True,
         )
         self.context.lua = lua
 
         registry = { **self.registry }
-        registry = as_attrgetter(registry)
 
         sandbox = lua.eval(SANDBOX)
 
         success, ret = sandbox(
+            lib,
             code,
-            registry,
+            as_attrgetter(registry),
         )
 
         if not success:
@@ -496,6 +510,13 @@ class Graph:
             'GraphShaderTranspiler.py',
             '-i', '/dev/stdin',
             '-f', 'element', self.attributes['index'].path,
+        ] + [
+            x
+            for name, attribute in self.attributes.items()
+            for x in [
+                '-f', name, attribute.path,
+            ]
+        ] + [
             '-e', 'GS_OUTPUT', '/dev/stdout',
             '-e', 'GS_TILE_WIDTH', '256',
             '-e', 'GS_TILE_HEIGHT', '256',
@@ -572,18 +593,45 @@ def _weave_graph_render(*, graph, z, x, y, code):
 import re
 
 from flask import Flask, request
+from flask_cors import CORS
 
 
 app = Flask(__name__)
+CORS(
+    app,
+    allow_headers=['Content-Type'],
+    always_send=True,
+    vary=False,
+)
 
 
 @app.route('/weave/', methods=['POST'])
 def weave():
-    code = request.args.get('code')
+    lib = None
+    code = None
+
+    json = request.get_json(silent=True)
+    if json is not None:
+        lib = json.get('lib', None)
+        code = json.get('code', None)
+
+    if lib is None:
+        lib = request.args.get('lib', None)
+
+    if lib is not None:
+        lib = base64.urlsafe_b64decode(lib)
+        lib = lib.decode('ascii')
+        
+    if code is None:
+        code = request.args.get('code')
+
+    assert code is not None, \
+        "Argument 'code' is required"
+
     code = base64.urlsafe_b64decode(code)
     code = code.decode('ascii')
 
-    ret = weaver.execute(code)
+    ret = weaver.execute(code=code, lib=lib)
 
     if isinstance(ret, str):
         match = re.match(r'^data:(?P<mediatype>image/jpeg)?(?:;(?P<encoding>base64))?(?:,(?P<data>.+))$', ret)

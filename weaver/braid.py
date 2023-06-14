@@ -217,6 +217,8 @@ class Integrator:
             vectorized=True,
         )
 
+        did_wrap_count = 0
+
         while True:
             message = integrator.step()
             if message is not None:
@@ -226,13 +228,31 @@ class Integrator:
             y = integrator.y
 
             prs, lng, lat = y
-            if prs < 0: break
-            if lng < 0.0: lng += 360.0
-            if lng > 360.0: lng -= 360.0
-            if lat < -90.0: lat += 180.0
-            if lat > 90.0: lat -= 180.0
+
+            did_wrap = False
+            if prs < 0:
+                break
+            if lng < 0.0:
+                lng += 360.0
+                did_wrap = True
+            if lng > 360.0:
+                lng -= 360.0
+                did_wrap = True
+            if lat < -90.0:
+                lat += 180.0
+                did_wrap = True
+            if lat > 90.0:
+                lat -= 180.0
+                did_wrap = True
+            
+            if did_wrap:
+                did_wrap_count += 1
+                if did_wrap_count % 10 == 0:
+                    print(f'Wrapped {did_wrap_count} times: {y = !r} to {(prs, lng, lat) = !r}')
 
             yield t, (prs, lng, lat)
+
+            integrator.y[:] = (prs, lng, lat)
 
             if integrator.status != 'running':
                 break
